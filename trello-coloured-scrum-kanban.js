@@ -1,199 +1,197 @@
 // ==UserScript==
-// @name Trello coloured Scrum Kanban
-// @namespace https://trello.com/
-// @version 3.1
-// @description Colour list for Scrum, referenced with Kanban Game - Optimized for performance
-// @match https://trello.com/*
-// @require http://code.jquery.com/jquery-latest.js
-// @author       Michael Wan (Optimized version)
-// @downloadURL https://update.greasyfork.org/scripts/37171/Trello%20coloured%20Scrum%20Kanban.user.js
-// @updateURL https://update.greasyfork.org/scripts/37171/Trello%20coloured%20Scrum%20Kanban.meta.js
+// @name         Trello coloured Scrum Kanban
+// @namespace    https://trello.com/
+// @version      3.2
+// @description  Colour lists & cards, show WIP and story-point insights
+// @match        https://trello.com/*
+// @require      http://code.jquery.com/jquery-latest.js
+// @author       Michael Wan
 // ==/UserScript==
+(function($) {
+  'use strict';
 
-(function() {
-    'use strict';
+  //── configs ────────────────────────────────────────────────────────────
+  const COLORS = {
+    list: {
+      Development: '#9ec4ff',
+      Testing:     '#dbffd1',
+      'Ready to Deploy': '#c4c4c4',
+      Deployed:    '#898989'
+    },
+    cardBorder: {
+      '!!': '#ff8300',
+       '!': '#ffd800',
+      '`': '#dbf3ff'
+    },
+    cardBg: {
+      '[P]': '#fdffbf',
+      '[Parent]': '#fdffbf',
+      Blocked: '#fabaff',
+      '[VIP]': '#ff6363',
+      '[R]': '#eeffbf',
+      '[INFO]': '#e0f8ff'
+    },
+    idColor:       '#ffd396',
+    noEstimate:    '#c1150f',
+    whiteText:     '#fff',
+    wipHighlight:  'yellow'
+  };
+  const WIP_LIMIT  = 2;
+  const REFRESH_MS = 2000;
 
-    // Colors configuration
-    const colors = {
-        red: '#fccbc2',
-        blue: '#9ec4ff',
-        green: '#dbffd1',
-        grey: '#c4c4c4',
-        black: '#898989',
-        white: '#fff',
-        yellow: '#ffd800',
-        lightyellow: '#fdffbf',
-        darkred: '#ff6363',
-        lightblue: '#dbf3ff',
-        lightorange: '#ffd396',
-        darkdarkred: '#c1150f',
-        pink: '#fabaff',
-        orange: '#ff8300'
-    };
+  //── list colouring ────────────────────────────────────────────────────
+  function colorLists() {
+    $('.list-wrapper').each(function() {
+      const title = $(this)
+        .find('.list-header-name-assist')
+        .text()
+        .trim();
+      const bg = COLORS.list[title];
+      if (bg) {
+        $(this)
+          .css('background', bg)
+          .find('h2')
+          .css('color', COLORS.whiteText);
+      }
+    });
+  }
 
-    // WIP limit configuration
-    const WIP_LIMIT = 2;
+  //── card borders & backgrounds ────────────────────────────────────────
+  function styleCards() {
+    $("[data-testid='trello-card']").each(function() {
+      const $card = $(this);
+      const text  = $card.text();
 
-    // Update intervals (in milliseconds)
-    const UPDATE_INTERVAL = 2000;
+      // reset
+      $card.css({ border: '', background: '' });
 
-    // Initialize when document is ready
-    $(document).ready(function() {
-        // Apply initial styles and set up periodic updates
-        applyStyles();
-        setInterval(applyStyles, UPDATE_INTERVAL);
+      // borders
+      for (const [marker, color] of Object.entries(COLORS.cardBorder)) {
+        if (text.includes(marker)) {
+          $card.css('border', `5px solid ${color}`);
+          break; // only one border
+        }
+      }
 
-        // Start WIP and list insight monitors
-        updateWIP();
-        setInterval(updateWIP, UPDATE_INTERVAL);
+      // backgrounds
+      for (const [marker, color] of Object.entries(COLORS.cardBg)) {
+        if (text.includes(marker)) {
+          $card.css('background', color);
+          break;
+        }
+      }
+    });
+  }
 
-        updateListInsight();
-        setInterval(updateListInsight, UPDATE_INTERVAL);
+  //── show card IDs & highlight missing estimates ───────────────────────
+  function annotateCardIds() {
+    $('.card-short-id')
+      .append(' ')
+      .removeClass('hide')
+      .css('color', COLORS.idColor);
+
+    $('.js-card-name').filter(function() {
+      return !/\(\d+\)/.test($(this).text());
+    })
+    .find('.card-short-id')
+    .css('color', COLORS.noEstimate);
+  }
+
+  //── compute & display WIP per member ──────────────────────────────────
+  function updateWIP() {
+    $('#actualWIP').remove();
+    const $header = $('.board-header');
+    if (!$header.length) return;
+
+    $header.after(
+      `<div id="actualWIP" style="color:${COLORS.whiteText}">
+         ActualWIP (excl. Blocked):
+       </div>`
+    );
+
+    // initialize members
+    const counts = new Map();
+    $('img.member-avatar').each(function() {
+      const name = this.alt.replace(/\(.+\)/, '');
+      counts.set(name, 0);
     });
 
-    // Apply all styles to Trello elements
-    function applyStyles() {
-        // Color the lists based on header text
-        $("h2:contains('Development')").css('color', colors.white).parents('.list').css('background', colors.blue);
-        $("h2:contains('Testing')").css('color', colors.white).parents('.list').css('background', colors.green);
-        $("h2:contains('Ready to Deploy')").css('color', colors.white).parents('.list').css('background', colors.grey);
-        $("h2:contains('Deployed')").css('color', colors.white).parents('.list').css('background', colors.black);
+    // find "In Progress" list
+    const $inProg = $('textarea:contains("In Progress")')
+      .closest('.list-wrapper');
 
-        // Style cards with special markers
-        $("a:contains('!')").parents("[data-testid='trello-card']").css({
-            'border-color': colors.yellow,
-            'border-style': 'solid',
-            'border-width': '5px'
-        });
+    // tally assignments
+    const tally = (selector, map) =>
+      $inProg.find(selector).each(function() {
+        const name = this.alt.replace(/\(.+\)/, '');
+        map.set(name, (map.get(name)||0) + 1);
+      });
 
-        $("a:contains('!!')").parents("[data-testid='trello-card']").css({
-            'border-color': colors.orange,
-            'border-style': 'solid',
-            'border-width': '5px'
-        });
+    const normal = new Map(), blocked = new Map();
+    tally('img.member-avatar', normal);
+    tally(
+      "span[title='Blocked'], span[title='Keep Monitoring'], \
+       span[title='Pending for Desk Check'], span[title='[Parent]'], span[title='[P]']"
+      + ' .closest("a.list-card") img.member-avatar',
+      blocked
+    );
 
-        $("a:contains('`')").parents("[data-testid='trello-card']").css({
-            'border-color': colors.lightblue,
-            'border-style': 'solid',
-            'border-width': '5px'
-        });
-
-        // Apply background colors to special cards
-        $("a:contains('[P]')").parents("[data-testid='trello-card']").css('background', colors.lightyellow);
-        $("a:contains('[Parent]')").parents("[data-testid='trello-card']").css('background', colors.lightyellow);
-        $("a:contains('Blocked')").parents("[data-testid='trello-card']").css('background', colors.pink);
-        $("a:contains('[VIP]')").parents("[data-testid='trello-card']").css('background', colors.darkred);
-        $("a:contains('[R]')").parents("[data-testid='trello-card']").css('background', '#eeffbf');
-        $("a:contains('[INFO]')").parents("[data-testid='trello-card']").css('background', '#e0f8ff');
-
-        // Show and style card IDs
-        $(".card-short-id").append(" ").removeClass("hide").css('color', colors.lightorange);
-
-        // Highlight cards without estimates
-        $("a[class='trello-card-title js-card-name']").filter(function() {
-            return !new RegExp("\\(\\d+\\)").test($(this).text());
-        }).find(".card-short-id").css('color', colors.darkdarkred);
+    // compute actual WIP = normal − blocked
+    for (const name of counts.keys()) {
+      const n = normal.get(name) || 0;
+      const b = blocked.get(name) || 0;
+      counts.set(name, n - b);
     }
 
-    // Update Work In Progress information
-    function updateWIP() {
-        // Remove previous WIP display
-        $("#actualWIP").remove();
+    // render
+    counts.forEach((v, name) => {
+      const text = `${name}: ${v}`;
+      const html = (v === 0 || v > WIP_LIMIT)
+        ? `<b style="color:${COLORS.wipHighlight}">${text}</b>`
+        : text;
+      $('#actualWIP').append(html + ' , ');
+    });
+  }
 
-        // Add new WIP display
-        $(".board-header").after("<div id='actualWIP' style='color: white; padding: 5px; background: rgba(0,0,0,0.1);'>ActualWIP (excluded Blocked): </div>");
+  //── story-point & card-count insights ─────────────────────────────────
+  function updateListInsights() {
+    $('.StoryPtInsight').remove();
 
-        // Get all members
-        var allMember = $("div.list-wrapper")
-            .find("img.member-avatar")
-            .map(function() {
-                return this.alt.replace(/\(.+\)/, "");
-            })
-            .toArray();
+    $('.list-wrapper').each(function() {
+      const $list = $(this);
+      const count = $list.find('.list-card').length;
 
-        // Create member map
-        var finalMap = new Map();
-        for (var i in allMember) {
-            finalMap.set(allMember[i], 0);
-        }
+      let pts = 0, miss = 0;
+      $list.find('.badge-text').each(function() {
+        const t = $(this).text();
+        const n = parseFloat(t);
+        if (t === 'Unestimated') miss++;
+        else if (!isNaN(n))        pts += n;
+      });
 
-        // Find in-progress list
-        var inProgressList = $('textarea:contains("In Progress")').closest("div.list-wrapper");
+      const insight = `
+        <p class="StoryPtInsight">
+          <b style="color:green">#Cards:${count}</b>
+          <b style="color:blue">#StoryPt:${pts}</b>
+          ${miss ? `<b style="color:red">#Miss:${miss}</b>` : ''}
+        </p>`;
+      $list.find('textarea.list-header-name').after(insight);
+    });
+  }
 
-        // If In Progress list exists
-        if (inProgressList.length > 0) {
-            // Count normal assignments
-            var normalMap = inProgressList
-                .find("img.member-avatar")
-                .map(function() {
-                    return this.alt.replace(/\(.+\)/, "");
-                })
-                .toArray()
-                .reduce((acc, val) => acc.set(val, 1 + (acc.get(val) || 0)), new Map());
+  //── orchestrator ──────────────────────────────────────────────────────
+  function refreshAll() {
+    colorLists();
+    styleCards();
+    annotateCardIds();
+    updateWIP();
+    updateListInsights();
+  }
 
-            // Count blocked assignments
-            var blockedMap = inProgressList
-                .find("span[title='Blocked'], span[title='Keep Monitoring'], span[title='Pending for Desk Check'], span[title='[Parent]'], span[title='[P]']")
-                .closest("a.list-card")
-                .find("img.member-avatar")
-                .map(function() {
-                    return this.alt.replace(/\(.+\)/, "");
-                })
-                .toArray()
-                .reduce((acc, val) => acc.set(val, 1 + (acc.get(val) || 0)), new Map());
+  //── kick off on load + every REFRESH_MS ────────────────────────────────
+  $(document).ready(() => {
+    refreshAll();
+    setInterval(refreshAll, REFRESH_MS);
+  });
 
-            // Calculate final WIP for each member
-            for (var [key, value] of finalMap.entries()) {
-                var point = normalMap.get(key) === undefined ? 0 : normalMap.get(key);
-                var blockedPoint = blockedMap.get(key) === undefined ? 0 : blockedMap.get(key);
-                finalMap.set(key, point - blockedPoint);
-            }
-
-            // Display WIP information
-            var wipOutput = [];
-            finalMap.forEach(function(value, key) {
-                if (value === 0 || value > WIP_LIMIT) {
-                    wipOutput.push("<b style='color: yellow'>" + key + ": " + value + "</b>");
-                } else {
-                    wipOutput.push(key + ": " + value);
-                }
-            });
-
-            $("#actualWIP").append(wipOutput.join(" , "));
-        }
-    }
-
-    // Update list insights
-    function updateListInsight() {
-        // Remove previous insights
-        $('p.StoryPtInsight').remove();
-
-        // Process each list
-        $('div.list-wrapper').each(function() {
-            var listname = $(this).find('textarea.list-header-name').text();
-            var listcardLength = $(this).find(".list-card").length;
-            var listStoryPt = 0;
-            var missedPtCardNumber = 0;
-
-            // Calculate story points
-            $(this).find(".list-card").find(".plugin-color-green,.plugin-color-lime,.plugin-color-yellow,.plugin-color-red").find(".badge-text").each(function() {
-                var storyPtStr = $(this).text();
-                var storyPt = parseFloat(storyPtStr) || 0;
-                missedPtCardNumber += storyPtStr == "Unestimated" ? 1 : 0;
-                listStoryPt += storyPt;
-            });
-
-            // Create insight HTML
-            var appendHTML = "<p class='StoryPtInsight'><b style='color: green'>#Cards:" + listcardLength + "</b> <b style='color: blue'>#StoryPt:" + listStoryPt + "</b>";
-
-            if (missedPtCardNumber > 0) {
-                appendHTML += " <b style='color: red'>#Miss:" + missedPtCardNumber + "</b>";
-            }
-
-            appendHTML += "</p>";
-
-            // Add insight to list header
-            $(this).find('textarea.list-header-name').after(appendHTML);
-        });
-    }
-})();
+})(jQuery);
